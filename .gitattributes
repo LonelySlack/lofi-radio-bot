@@ -1,0 +1,7 @@
+# Authored on Windows, deployed on Linux. Force LF for anything the server
+# executes or parses, so a CRLF checkout can't produce `bad interpreter: /bin/bash^M`.
+* text=auto eol=lf
+*.sh      text eol=lf
+*.service text eol=lf
+*.js      text eol=lf
+*.json    text eol=lf

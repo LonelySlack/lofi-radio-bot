@@ -1,0 +1,27 @@
+# Install:
+#   cp lofi-radio.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now lofi-radio
+#   sudo loginctl enable-linger $USER      # keeps it running when you log out
+# Logs:
+#   journalctl --user -u lofi-radio -f
+[Unit]
+Description=24/7 Discord lofi radio bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/lofi-radio-bot
+ExecStart=%h/lofi-radio-bot/start.sh
+# The bot recovers from stream faults on its own; Restart=always is for the rarer
+# case where the *process* dies (OOM, a fatal discord.js error, a bad deploy).
+Restart=always
+RestartSec=10
+# Don't let a crash-loop hammer Discord's gateway and earn a rate-limit ban.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

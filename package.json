@@ -1,0 +1,16 @@
+{
+  "name": "lofi-radio-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "@noble/ciphers": "^1.2.1",
+    "discord.js": "^14.16.0"
+  },
+  "optionalDependencies": {
+    "sodium-native": "^4.2.0"
+  }
+}
