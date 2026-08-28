@@ -8,6 +8,10 @@
 Description=24/7 Discord lofi radio bot
 After=network-online.target
 Wants=network-online.target
+# Don't let a crash-loop hammer Discord's gateway and earn a rate-limit ban.
+# These are [Unit] directives - systemd ignores them under [Service].
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -17,9 +21,6 @@ ExecStart=%h/lofi-radio-bot/start.sh
 # case where the *process* dies (OOM, a fatal discord.js error, a bad deploy).
 Restart=always
 RestartSec=10
-# Don't let a crash-loop hammer Discord's gateway and earn a rate-limit ban.
-StartLimitIntervalSec=300
-StartLimitBurst=5
 StandardOutput=journal
 StandardError=journal
 
