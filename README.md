@@ -8,7 +8,8 @@ the same WARP setup, ffmpeg pipeline, and conventions.
 
 ## What it does
 
-- **Any station, not just lofi.** 20 built-in stations plus live search across
+- **Any station, not just lofi.** 50 built-in stations — including 30 Malaysian
+  channels (Astro Radio, RTM and the independents) — plus live search across
   ~50,000 real radio stations via [radio-browser.info](https://www.radio-browser.info)
   (free, no API key).
 - **Real now-playing.** Reads the current track straight off the Icecast/SHOUTcast
@@ -129,11 +130,44 @@ instead, which is far cheaper.
 | `PREFIX` | `lofi` | text command prefix |
 | `DEFAULT_STATION` | `lofigirl` | played by a bare `lofi play` |
 | `FALLBACK_STATION` | `somafm-fluid` | used when the primary keeps failing |
-| `YT_DLP_PROXY` | `socks5://127.0.0.1:40000` | WARP proxy; empty = direct |
+| `YT_DLP_PROXY` | `http://127.0.0.1:8118` | WARP proxy — **must be `http://`**, see below; empty = direct |
 | `STREAM_RECYCLE_HOURS` | `12` | periodic chain rebuild; `0` disables |
 | `PAUSE_WHEN_EMPTY` | off | cut the stream when nobody's listening |
 | `GUILD_ID` | — | register slash commands instantly to one guild |
 | `FFMPEG_PATH` / `YT_DLP_PATH` | `~/bin/...` | same binaries as the music bot |
+
+## YouTube stations need an http:// proxy, not SOCKS
+
+Only the YouTube entries need this; Icecast stations stream direct.
+
+yt-dlp resolves the HLS manifest through the proxy, so the manifest URL is
+IP-locked to that exit address. ffmpeg then fetches the segments — and if it
+goes out on a different IP, every segment comes back `403 Forbidden`. Both hops
+have to share one exit.
+
+The catch is that **ffmpeg cannot speak SOCKS**. libavformat gates on the scheme
+literally (`av_strstart(proxy_path, "http://", NULL)` in `http.c` / `tls.c`), so
+a `socks5://` value is silently ignored and the request goes out direct — no
+error, just 403s. It reads `http_proxy` (lowercase) for HTTPS too, and never
+reads `https_proxy`.
+
+So bridge WARP's SOCKS listener to an HTTP CONNECT proxy. With privoxy:
+
+```
+listen-address     127.0.0.1:8118
+forward-socks5t /  127.0.0.1:40000 .
+limit-connect      80,443
+keep-alive-timeout 30
+```
+
+`socks5t` (not `socks5`) resolves DNS on the WARP side, keeping resolution and
+egress on the same address. Then point `YT_DLP_PROXY` at `http://127.0.0.1:8118`.
+The bot passes it to yt-dlp *and* as ffmpeg's `-http_proxy`; ffmpeg propagates
+that to child segment requests on its own (`hls.c`'s `save_avio_options()`
+whitelists `http_proxy`), so one flag covers manifest and segments.
+
+Verify with `verify-lofi-warp.sh` — it checks the bridge egresses through WARP,
+resolves a live manifest, and captures 60s, asserting sustained Ogg/Opus.
 
 ## Resource use
 

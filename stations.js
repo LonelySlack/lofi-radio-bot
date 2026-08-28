@@ -4,9 +4,9 @@
 // Two station types:
 //   'icecast'  — a direct HTTP stream URL. ffmpeg consumes it as-is. Rock solid,
 //                and it carries ICY metadata so we get real now-playing titles.
-//   'youtube'  — a YouTube *live* stream. yt-dlp streams it to stdout and we pipe
-//                that into ffmpeg (see bot.js). No ICY metadata; the title is the
-//                stream's video title, fetched once at connect.
+//   'youtube'  — a YouTube *live* stream. yt-dlp resolves the HLS manifest URL and
+//                ffmpeg streams it directly (see bot.js). No ICY metadata; the
+//                title is the stream's video title, fetched once at connect.
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import https from 'https';
@@ -14,8 +14,12 @@ import http from 'http';
 
 const execFileAsync = promisify(execFile);
 const YT_DLP = process.env.YT_DLP_PATH || '/home/lonelyslack/bin/yt-dlp';
-// Route yt-dlp through Cloudflare WARP (SOCKS proxy) — see bot.js for why.
-const YT_PROXY = process.env.YT_DLP_PROXY ?? 'socks5://127.0.0.1:40000';
+// Route yt-dlp through Cloudflare WARP — see bot.js for why. This must be an
+// http:// proxy, not socks5://: ffmpeg fetches the manifest and segments itself
+// and libavformat only honours a proxy value literally starting with "http://"
+// (av_strstart in http.c / tls.c), so a socks5:// value is silently ignored and
+// the request goes out direct. privoxy bridges CONNECT to WARP's SOCKS listener.
+const YT_PROXY = process.env.YT_DLP_PROXY ?? 'http://127.0.0.1:8118';
 export const YT_ARGS = ['--js-runtimes', 'node', ...(YT_PROXY ? ['--proxy', YT_PROXY] : [])];
 
 /* ============================ built-in catalog ============================ */
@@ -50,6 +54,42 @@ export const BUILTIN = [
   { id: 'somafm-defcon',  name: 'SomaFM DEF CON Radio', type: 'icecast', genre: 'electronic',url: 'https://ice1.somafm.com/defcon-128-mp3' },
   { id: 'somafm-goa',     name: 'SomaFM Suburbs of Goa',type: 'icecast', genre: 'world',     url: 'https://ice1.somafm.com/suburbsofgoa-128-mp3' },
   { id: 'somafm-boot',    name: 'SomaFM Boot Liquor',   type: 'icecast', genre: 'country',   url: 'https://ice1.somafm.com/bootliquor-128-mp3' },
+  // ---- Malaysia ----------------------------------------------------------
+  // Astro Radio and RTM both publish open stream endpoints. The Astro ones are
+  // given as the stable stream.rcs.revma.com/<id> form rather than the
+  // n<NN>-eu.rcs.revma.com edge URLs radio-browser hands out, which are
+  // session-specific and rotate. None of these carry ICY metadata, so `np`
+  // shows the station name rather than the current song.
+  { id: 'era',         name: 'ERA FM',            type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/crec9cmbv4uvv' },
+  { id: 'hitz',        name: 'HITZ',              type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/488kt4sbv4uvv' },
+  { id: 'sinar',       name: 'SINAR FM',          type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/azatk0tbv4uvv' },
+  { id: 'melody',      name: 'MELODY FM',         type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/2u1n6dtbv4uvv' },
+  { id: 'lite',        name: 'LITE FM',           type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/bn4ex8sbv4uvv' },
+  { id: 'zayan',       name: 'ZAYAN',             type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/7ww2a4tbv4uvv' },
+  { id: 'gegar',       name: 'THR Gegar',         type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/cn0zcqsbv4uvv' },
+  { id: 'raaga',       name: 'RAAGA',             type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/1ut6qwtbv4uvv' },
+  { id: 'goxuan',      name: 'goXuan',            type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/xt9nhzsbv4uvv' },
+  { id: 'era-swk',     name: 'ERA Sarawak',       type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/bkqfqkrbv4uvv' },
+  { id: 'bfm',         name: 'BFM 89.9',          type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/s91qy9p0zs3vv' },
+  { id: '988',         name: '988 FM',            type: 'icecast', genre: 'malaysia', url: 'https://28103.live.streamtheworld.com/988_FMAAC.aac' },
+  { id: 'fly',         name: 'Fly FM',            type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/q17aka9mtd3vv' },
+  { id: 'eight',       name: 'Eight FM',          type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/qp0xrd9mtd3vv' },
+  { id: 'cats',        name: 'Cats FM',           type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/51qe53rv0y3vv' },
+  { id: 'cityplus',    name: 'CITYPlus FM',       type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/9ykdmcawe1bwv' },
+  { id: 'redfm',       name: 'RED FM',            type: 'icecast', genre: 'malaysia', url: 'https://22273.live.streamtheworld.com/RED_FMAAC.aac' },
+  { id: 'amboi',       name: 'Amboi FM',          type: 'icecast', genre: 'malaysia', url: 'http://amboifm.iradio.work:8000/stream' },
+  { id: 'nasional',    name: 'Nasional FM',       type: 'icecast', genre: 'malaysia', url: 'http://playerservices.streamtheworld.com/api/livestream-redirect/NASIONAL_FM.mp3' },
+  { id: 'klasik',      name: 'Klasik Nasional',   type: 'icecast', genre: 'malaysia', url: 'http://playerservices.streamtheworld.com/api/livestream-redirect/RADIO_KLASIK.mp3' },
+  { id: 'traxx',       name: 'TraXX FM',          type: 'icecast', genre: 'malaysia', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/TRAXX_FMAAC_SC' },
+  { id: 'aifm',        name: 'Ai FM',             type: 'icecast', genre: 'malaysia', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/AI_FMAAC_SC' },
+  { id: 'asyik',       name: 'Asyik FM',          type: 'icecast', genre: 'malaysia', url: 'http://playerservices.streamtheworld.com/api/livestream-redirect/ASYIK_FM.mp3' },
+  { id: 'kelantan',    name: 'Kelantan FM',       type: 'icecast', genre: 'malaysia', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/KELANTAN_FMAAC.aac' },
+  { id: 'terengganu',  name: 'Terengganu FM',     type: 'icecast', genre: 'malaysia', url: 'https://22243.live.streamtheworld.com/TERENGGANU_FMAAC_SC' },
+  { id: 'sabah',       name: 'Sabah FM',          type: 'icecast', genre: 'malaysia', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/SABAH_FMAAC.aac' },
+  { id: 'langkawi',    name: 'Langkawi FM',       type: 'icecast', genre: 'malaysia', url: 'http://playerservices.streamtheworld.com/api/livestream-redirect/LANGKAWI_FM.mp3' },
+  { id: 'keningau',    name: 'Keningau FM',       type: 'icecast', genre: 'malaysia', url: 'http://playerservices.streamtheworld.com/api/livestream-redirect/KENINGAU_FM.mp3' },
+  { id: 'wai-iban',    name: 'WAI FM Iban',       type: 'icecast', genre: 'malaysia', url: 'http://playerservices.streamtheworld.com/api/livestream-redirect/WAI_FM_IBAN.mp3' },
+  { id: 'wai-bidayuh', name: 'WAI FM Bidayuh',    type: 'icecast', genre: 'malaysia', url: 'http://playerservices.streamtheworld.com/api/livestream-redirect/WAI_FM_BK.mp3' },
 ];
 
 const norm = s => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -156,6 +196,20 @@ export async function youtubeLiveTitle(url) {
     { timeout: 30000 }
   );
   return (stdout || '').trim().split('\n').filter(Boolean).pop() || null;
+}
+
+// Resolve a YouTube live URL to its HLS manifest. yt-dlp does extraction only —
+// ffmpeg does the actual streaming — so this runs once per (re)connect. The
+// manifest carries an `expire` param a few hours out; when it lapses ffmpeg
+// fails, the watchdog fires, and the retry re-resolves through here.
+export async function youtubeManifestUrl(url) {
+  const { stdout } = await execFileAsync(
+    YT_DLP, [...YT_ARGS, '-f', 'ba[protocol^=m3u8]/ba/b', '--no-playlist', '-g', url],
+    { timeout: 45000 }
+  );
+  const manifest = (stdout || '').trim().split('\n').filter(Boolean)[0];
+  if (!manifest) throw new Error('yt-dlp returned no manifest URL');
+  return manifest;
 }
 
 /* ============================ ICY now-playing ============================ */

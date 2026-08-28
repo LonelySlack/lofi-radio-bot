@@ -6,7 +6,7 @@ import { Transform } from 'stream';
 import { readFileSync, writeFileSync, existsSync, renameSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { BUILTIN, findStation, stationFromUrl, searchStations, resolveStationId, youtubeLiveTitle, fetchIcyTitle, YT_ARGS } from './stations.js';
+import { BUILTIN, findStation, stationFromUrl, searchStations, resolveStationId, youtubeLiveTitle, youtubeManifestUrl, fetchIcyTitle, YT_ARGS } from './stations.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 if (existsSync(join(__dirname, '.env'))) {
@@ -17,7 +17,6 @@ if (existsSync(join(__dirname, '.env'))) {
 }
 const execFileAsync = promisify(execFile);
 
-const YT_DLP = process.env.YT_DLP_PATH || '/home/lonelyslack/bin/yt-dlp';
 const FFMPEG = process.env.FFMPEG_PATH || '/home/lonelyslack/bin/ffmpeg';
 const TOKEN = process.env.DISCORD_TOKEN;
 const PREFIX = process.env.PREFIX || 'lofi';
@@ -25,7 +24,7 @@ const DEFAULT_STATION = process.env.DEFAULT_STATION || 'lofigirl';
 const FALLBACK_STATION = process.env.FALLBACK_STATION || 'somafm-fluid';
 const RECYCLE_MS = (parseFloat(process.env.STREAM_RECYCLE_HOURS ?? '12') || 0) * 3600 * 1000;
 const PAUSE_WHEN_EMPTY = /^(1|true|yes)$/i.test(process.env.PAUSE_WHEN_EMPTY || '');
-const YT_PROXY = process.env.YT_DLP_PROXY ?? 'socks5://127.0.0.1:40000';
+const YT_PROXY = process.env.YT_DLP_PROXY ?? 'http://127.0.0.1:8118';
 const ADMIN_IDS = new Set((process.env.ADMIN_ID || '').split(',').map(s => s.trim()).filter(Boolean));
 if (!TOKEN) { console.error('DISCORD_TOKEN required'); process.exit(1); }
 
@@ -149,31 +148,37 @@ function startIcyPoll(guildId) {
 
 // Build the process chain for a station and hand @discordjs/voice the Opus stream.
 //   icecast → ffmpeg reads the HTTP stream directly (with its own reconnect logic)
-//   youtube → yt-dlp streams the live broadcast to stdout, ffmpeg transcodes it.
-//             Piping through yt-dlp (rather than handing ffmpeg a resolved .m3u8)
-//             is deliberate: YouTube's manifest URLs expire after a few hours, and
-//             yt-dlp refreshes them internally so the stream just keeps going.
-function buildChain(q, guildId, station) {
+//   youtube → yt-dlp resolves the HLS manifest, ffmpeg streams it directly.
+//             Both hops must exit through the same proxy: the manifest URL is
+//             IP-locked to whatever address requested it, so resolving via WARP
+//             and then fetching segments direct earns a 403 on every segment.
+//             ffmpeg propagates -http_proxy from the manifest to its child
+//             segment requests (hls.c save_avio_options whitelists it), so one
+//             flag covers both. The manifest expires after a few hours; ffmpeg
+//             then fails, the watchdog fires, and the retry re-resolves.
+async function buildChain(q, guildId, station) {
   const procs = [];
   let ff;
   if (station.type === 'youtube') {
-    const dl = spawn(YT_DLP, [...YT_ARGS, station.url, '-f', 'bestaudio/best', '--no-playlist', '--no-part', '-o', '-', '--quiet', '--no-warnings'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let err = '';
-    dl.stderr.on('data', d => { err += d; if (err.length > 4000) err = err.slice(-2000); });
-    dl.on('error', (e) => onStreamDown(guildId, `yt-dlp spawn: ${e.message}`));
-    dl.on('close', (code) => {
-      if (code !== 0 && code !== null) {
-        const tail = err.trim().split('\n').slice(-2).join(' | ').slice(0, 200);
-        // A bot-check here means the WARP exit IP is flagged; rotate before the
-        // watchdog's retry so the next attempt gets a fresh IP.
-        if (YT_PROXY && isBotCheck(err)) { console.warn(`[${guildId}] yt-dlp bot-check — rotating WARP`); rotateWarp(); }
-        onStreamDown(guildId, `yt-dlp exit ${code}: ${tail}`);
-      }
-    });
-    dl.stdout.on('error', () => {});
-    procs.push(dl);
-    ff = spawn(FFMPEG, ['-loglevel', 'info', '-i', 'pipe:0', ...ffTail(q)], { stdio: ['pipe', 'pipe', 'pipe'] });
-    dl.stdout.pipe(ff.stdin).on('error', () => {});
+    let manifest;
+    try {
+      manifest = await youtubeManifestUrl(station.url);
+    } catch (e) {
+      const err = String(e.stderr || e.message || e);
+      // A bot-check means the WARP exit IP is flagged; rotate so the retry that
+      // follows gets a fresh one.
+      if (YT_PROXY && isBotCheck(err)) { console.warn(`[${guildId}] yt-dlp bot-check — rotating WARP`); rotateWarp(); }
+      throw new Error(`yt-dlp resolve: ${err.trim().split('\n').pop().slice(0, 200)}`);
+    }
+    ff = spawn(FFMPEG, [
+      '-loglevel', 'info',
+      ...(YT_PROXY ? ['-http_proxy', YT_PROXY] : []),
+      '-reconnect', '1', '-reconnect_streamed', '1',
+      '-reconnect_on_network_error', '1', '-reconnect_on_http_error', '4xx,5xx',
+      '-reconnect_delay_max', '5',
+      '-rw_timeout', '15000000',
+      '-i', manifest, ...ffTail(q),
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
   } else {
     ff = spawn(FFMPEG, [
       '-loglevel', 'info',
@@ -220,7 +225,13 @@ async function startStream(guildId, station) {
     // while the connection isn't Ready, so starting early burns the first seconds.
     await awaitVoiceReady(q, guildId);
     if (q.stopped) return;
-    const resource = buildChain(q, guildId, station);
+    let resource;
+    try {
+      resource = await buildChain(q, guildId, station);
+    } catch (e) {
+      onStreamDown(guildId, e.message);
+      return;
+    }
     q.streaming = true;
     q.startedAt = Date.now();
     q.lastData = Date.now();
@@ -228,6 +239,10 @@ async function startStream(guildId, station) {
     // YouTube gives us no in-band metadata, so the video title is the best we
     // have; Icecast stations get polled for the live track name instead.
     if (station.type === 'youtube') {
+      // Switching from an Icecast station leaves its poller running, and `tick`
+      // re-reads q.station each time - so it would start polling the YouTube
+      // watch page for ICY titles until it gave up. Stop it explicitly.
+      stopIcyPoll(q);
       youtubeLiveTitle(station.url).then(t => { if (t && q.station === station) setNowPlaying(guildId, t); }).catch(() => {});
     } else {
       startIcyPoll(guildId);
