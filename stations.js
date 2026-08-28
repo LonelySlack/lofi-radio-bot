@@ -7,6 +7,7 @@
 //   'youtube'  — a YouTube *live* stream. yt-dlp resolves the HLS manifest URL and
 //                ffmpeg streams it directly (see bot.js). No ICY metadata; the
 //                title is the stream's video title, fetched once at connect.
+import './env.js';           // must come first — see env.js
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import https from 'https';

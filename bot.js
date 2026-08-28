@@ -1,3 +1,4 @@
+import './env.js';           // must come first — see env.js
 import { Client, GatewayIntentBits, EmbedBuilder, ActivityType, SlashCommandBuilder, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, MessageFlags } from 'discord.js';
 import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, VoiceConnectionStatus, entersState, NoSubscriberBehavior, StreamType } from '@discordjs/voice';
 import { execFile, spawn } from 'child_process';
@@ -9,12 +10,6 @@ import { dirname, join } from 'path';
 import { BUILTIN, findStation, stationFromUrl, searchStations, resolveStationId, youtubeLiveTitle, youtubeManifestUrl, fetchIcyTitle, YT_ARGS } from './stations.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-if (existsSync(join(__dirname, '.env'))) {
-  for (const line of readFileSync(join(__dirname, '.env'), 'utf8').split('\n')) {
-    const m = line.match(/^\s*([\w]+)\s*=\s*(.*?)\s*$/);
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
-  }
-}
 const execFileAsync = promisify(execFile);
 
 const FFMPEG = process.env.FFMPEG_PATH || '/home/lonelyslack/bin/ffmpeg';
@@ -229,6 +224,11 @@ async function startStream(guildId, station) {
     try {
       resource = await buildChain(q, guildId, station);
     } catch (e) {
+      // onStreamDown bails while a start is in flight (it guards on q.starting),
+      // and the stall watchdog skips guilds that never reached q.streaming - so
+      // without clearing this first a failed resolve would schedule no retry at
+      // all and the guild would sit silent. The finally below re-clears it.
+      q.starting = false;
       onStreamDown(guildId, e.message);
       return;
     }
