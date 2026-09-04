@@ -337,6 +337,14 @@ function onStreamDown(guildId, reason, immediate = false, voiceFault = false) {
     && /player idle|ffmpeg exit/.test(reason);
 
   if (tokenRenewal) {
+    // Reaching here proves the stream played for longer than the grace period,
+    // so the station is demonstrably working: clear the counter. Without this a
+    // renewal left q.fails untouched, and the amnesty below could never help
+    // either — it wants HEALTHY_AFTER_MS of *continuous* play, and these edges
+    // hand out tokens that can expire in under 30s. So transient EIOs from the
+    // CDN accumulated across hours of healthy playback until the fourth one
+    // tripped the fallback. That is exactly how HITZ ended up on SomaFM.
+    q.fails = 0;
     console.log(`[${guildId}] ↻ ${q.station.name} edge token expired — re-resolving`);
   } else {
     // A stream that ran clean for a while and only then broke is fresh trouble,
