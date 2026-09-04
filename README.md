@@ -130,7 +130,7 @@ instead, which is far cheaper.
 | `PREFIX` | `lofi` | text command prefix |
 | `DEFAULT_STATION` | `lofigirl` | played by a bare `lofi play` |
 | `FALLBACK_STATION` | `somafm-fluid` | used when the primary keeps failing |
-| `YT_DLP_PROXY` | `http://127.0.0.1:8118` | WARP proxy — **must be `http://`**, see below; empty = direct |
+| `YT_DLP_PROXY` | `http://127.0.0.1:8118` | WARP proxy — **must be `http://`**, see below; empty = direct. If set but unreachable, YouTube degrades to direct rather than failing |
 | `STREAM_RECYCLE_HOURS` | `12` | periodic chain rebuild; `0` disables |
 | `PAUSE_WHEN_EMPTY` | off | cut the stream when nobody's listening |
 | `GUILD_ID` | — | register slash commands instantly to one guild |
@@ -168,6 +168,28 @@ whitelists `http_proxy`), so one flag covers manifest and segments.
 
 Verify with `verify-lofi-warp.sh` — it checks the bridge egresses through WARP,
 resolves a live manifest, and captures 60s, asserting sustained Ogg/Opus.
+
+### If the bridge goes down
+
+WARP is a workaround for bot-flagged exit IPs, not a requirement — on a home
+connection the direct path usually works, and may be *less* likely to be flagged
+than Cloudflare's shared egress. So a dead bridge should not cost you YouTube.
+
+Before each resolve the bot TCP-probes the proxy (result cached: 60s when up,
+10s when down, so recovery is noticed quickly). If it doesn't answer, that
+attempt runs direct and logs:
+
+```
+[warp] bridge unreachable at http://127.0.0.1:8118 — YouTube falling back to direct
+```
+
+`youtubeManifestUrl()` returns the proxy it actually used alongside the manifest,
+and ffmpeg is given that same value. Both hops must share one exit — re-deriving
+it separately would let the bridge flip between the two calls and turn every
+segment into a 403.
+
+Setting `YT_DLP_PROXY=` empty disables the whole path silently; that is a
+deliberate configuration, not a degradation, so it is not logged.
 
 ## Resource use
 

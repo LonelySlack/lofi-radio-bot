@@ -12,6 +12,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import https from 'https';
 import http from 'http';
+import { connect as netConnect } from 'net';
 
 const execFileAsync = promisify(execFile);
 const YT_DLP = process.env.YT_DLP_PATH || '/home/lonelyslack/bin/yt-dlp';
@@ -21,7 +22,53 @@ const YT_DLP = process.env.YT_DLP_PATH || '/home/lonelyslack/bin/yt-dlp';
 // (av_strstart in http.c / tls.c), so a socks5:// value is silently ignored and
 // the request goes out direct. privoxy bridges CONNECT to WARP's SOCKS listener.
 const YT_PROXY = process.env.YT_DLP_PROXY ?? 'http://127.0.0.1:8118';
-export const YT_ARGS = ['--js-runtimes', 'node', ...(YT_PROXY ? ['--proxy', YT_PROXY] : [])];
+export function ytArgs(proxy) {
+  return ['--js-runtimes', 'node', ...(proxy ? ['--proxy', proxy] : [])];
+}
+
+// The bridge is a separate process (privoxy) fronting a separate daemon (WARP),
+// and either can stop without the bot noticing. When that happens every YouTube
+// station becomes an unresolvable station, and the retry ladder marches to the
+// fallback while the direct path would have worked fine - which is the worse
+// outcome, because WARP is a workaround for bot-flagging, not a requirement.
+// So probe it, and degrade to direct rather than to silence.
+const PROXY_OK_TTL = 60000;   // it answered; don't re-probe for a while
+const PROXY_BAD_TTL = 10000;  // it didn't; notice recovery quickly
+let _proxyCheckedAt = 0, _proxyOk = false;
+
+function tcpProbe(host, port, ms = 1500) {
+  return new Promise(resolve => {
+    const sock = netConnect({ host, port });
+    let settled = false;
+    const done = ok => { if (settled) return; settled = true; sock.destroy(); resolve(ok); };
+    sock.setTimeout(ms);
+    sock.once('connect', () => done(true));
+    sock.once('timeout', () => done(false));
+    sock.once('error', () => done(false));
+  });
+}
+
+// Which proxy YouTube should use right now - the configured one when the bridge
+// answers, otherwise '' for direct. yt-dlp resolves the manifest and ffmpeg
+// fetches the segments, and the manifest is IP-locked to whoever fetched it, so
+// both hops MUST agree. Resolve this once per attempt and hand the same value
+// to both; never call it twice for one stream.
+export async function ytProxy() {
+  if (!YT_PROXY) return '';
+  const now = Date.now();
+  if (now - _proxyCheckedAt < (_proxyOk ? PROXY_OK_TTL : PROXY_BAD_TTL)) return _proxyOk ? YT_PROXY : '';
+  let host, port;
+  try { const u = new URL(YT_PROXY); host = u.hostname; port = Number(u.port) || 80; }
+  catch { return ''; }
+  const ok = await tcpProbe(host, port);
+  if (ok !== _proxyOk || !_proxyCheckedAt) {
+    console.warn(ok
+      ? `[warp] bridge up at ${YT_PROXY} — YouTube via WARP`
+      : `[warp] bridge unreachable at ${YT_PROXY} — YouTube falling back to direct`);
+  }
+  _proxyOk = ok; _proxyCheckedAt = now;
+  return ok ? YT_PROXY : '';
+}
 
 /* ============================ built-in catalog ============================ */
 // Hand-picked stations that are reliable enough to hardcode. Everything else
@@ -36,6 +83,8 @@ export const BUILTIN = [
   // ---- lofi / chill (the default vibe) ----
   { id: 'lofigirl',       name: 'Lofi Girl',            type: 'youtube', genre: 'lofi',      url: 'https://www.youtube.com/@LofiGirl/live' },
   { id: 'somafm-fluid',   name: 'SomaFM Fluid',         type: 'icecast', genre: 'lofi',      url: 'https://ice1.somafm.com/fluid-128-mp3' },
+  { id: 'chillhop',       name: 'Chillhop Music',       type: 'youtube', genre: 'lofi',      url: 'https://www.youtube.com/@ChillhopMusic/live' },
+  { id: 'bootlegboy',     name: 'The Bootleg Boy',      type: 'youtube', genre: 'lofi',      url: 'https://www.youtube.com/@thebootlegboy/live' },
   { id: 'somafm-groove',  name: 'SomaFM Groove Salad',  type: 'icecast', genre: 'chill',     url: 'https://ice1.somafm.com/groovesalad-128-mp3' },
   { id: 'somafm-lush',    name: 'SomaFM Lush',          type: 'icecast', genre: 'chill',     url: 'https://ice1.somafm.com/lush-128-mp3' },
   { id: 'somafm-drone',   name: 'SomaFM Drone Zone',    type: 'icecast', genre: 'ambient',   url: 'https://ice1.somafm.com/dronezone-128-mp3' },
@@ -55,6 +104,17 @@ export const BUILTIN = [
   { id: 'somafm-defcon',  name: 'SomaFM DEF CON Radio', type: 'icecast', genre: 'electronic',url: 'https://ice1.somafm.com/defcon-128-mp3' },
   { id: 'somafm-goa',     name: 'SomaFM Suburbs of Goa',type: 'icecast', genre: 'world',     url: 'https://ice1.somafm.com/suburbsofgoa-128-mp3' },
   { id: 'somafm-boot',    name: 'SomaFM Boot Liquor',   type: 'icecast', genre: 'country',   url: 'https://ice1.somafm.com/bootliquor-128-mp3' },
+  // ---- YouTube 24/7 live: sleep, nature, focus ---------------------------
+  // Channel /live URLs, same reasoning as Lofi Girl above. These are real
+  // broadcasts rather than loops, so a channel that ends its stream stops
+  // resolving until the next one starts - the fallback covers that.
+  { id: 'sleep',          name: 'Deep Sleep Music',     type: 'youtube', genre: 'sleep',     url: 'https://www.youtube.com/@YellowBrickCinema/live' },
+  { id: 'whitenoise',     name: 'Relaxing White Noise', type: 'youtube', genre: 'sleep',     url: 'https://www.youtube.com/@RelaxingWhiteNoise/live' },
+  { id: 'rain',           name: 'Rain Sounds',          type: 'youtube', genre: 'nature',    url: 'https://www.youtube.com/@TheRelaxedGuy/live' },
+  { id: 'piano',          name: 'Beautiful Piano',      type: 'youtube', genre: 'piano',     url: 'https://www.youtube.com/@SoothingRelaxation/live' },
+  { id: 'cafejazz',       name: 'Cafe Music BGM',       type: 'youtube', genre: 'jazz',      url: 'https://www.youtube.com/@CafeMusicBGMchannel/live' },
+  { id: 'calmed',         name: 'Calmed By Nature',     type: 'youtube', genre: 'jazz',      url: 'https://www.youtube.com/@CalmedByNature/live' },
+  { id: 'focus',          name: 'Focus & Study',        type: 'youtube', genre: 'focus',     url: 'https://www.youtube.com/@GreenredProductions/live' },
   // ---- Malaysia ----------------------------------------------------------
   // Astro Radio and RTM both publish open stream endpoints. The Astro ones are
   // given as the stable stream.rcs.revma.com/<id> form rather than the
@@ -193,7 +253,7 @@ export async function resolveStationId(id) {
 // must not stop playback, so callers ignore rejections.
 export async function youtubeLiveTitle(url) {
   const { stdout } = await execFileAsync(
-    YT_DLP, [...YT_ARGS, url, '--no-playlist', '--no-download', '--print', '%(title)s'],
+    YT_DLP, [...ytArgs(await ytProxy()), url, '--no-playlist', '--no-download', '--print', '%(title)s'],
     { timeout: 30000 }
   );
   return (stdout || '').trim().split('\n').filter(Boolean).pop() || null;
@@ -203,14 +263,19 @@ export async function youtubeLiveTitle(url) {
 // ffmpeg does the actual streaming — so this runs once per (re)connect. The
 // manifest carries an `expire` param a few hours out; when it lapses ffmpeg
 // fails, the watchdog fires, and the retry re-resolves through here.
+// Returns { manifest, proxy }. The proxy is reported back rather than re-derived
+// by the caller because ffmpeg must fetch the segments from the same egress that
+// resolved the manifest - re-deriving risks the bridge flipping state between
+// the two calls and every segment coming back 403.
 export async function youtubeManifestUrl(url) {
+  const proxy = await ytProxy();
   const { stdout } = await execFileAsync(
-    YT_DLP, [...YT_ARGS, '-f', 'ba[protocol^=m3u8]/ba/b', '--no-playlist', '-g', url],
+    YT_DLP, [...ytArgs(proxy), '-f', 'ba[protocol^=m3u8]/ba/b', '--no-playlist', '-g', url],
     { timeout: 45000 }
   );
   const manifest = (stdout || '').trim().split('\n').filter(Boolean)[0];
   if (!manifest) throw new Error('yt-dlp returned no manifest URL');
-  return manifest;
+  return { manifest, proxy };
 }
 
 /* ============================ ICY now-playing ============================ */

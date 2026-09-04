@@ -7,7 +7,7 @@ import { Transform } from 'stream';
 import { readFileSync, writeFileSync, existsSync, renameSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { BUILTIN, findStation, stationFromUrl, searchStations, resolveStationId, youtubeLiveTitle, youtubeManifestUrl, fetchIcyTitle, YT_ARGS } from './stations.js';
+import { BUILTIN, findStation, stationFromUrl, searchStations, resolveStationId, youtubeLiveTitle, youtubeManifestUrl, fetchIcyTitle, ytProxy } from './stations.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -32,7 +32,6 @@ const DEFAULT_STATION = process.env.DEFAULT_STATION || 'lofigirl';
 const FALLBACK_STATION = process.env.FALLBACK_STATION || 'somafm-fluid';
 const RECYCLE_MS = (parseFloat(process.env.STREAM_RECYCLE_HOURS ?? '12') || 0) * 3600 * 1000;
 const PAUSE_WHEN_EMPTY = /^(1|true|yes)$/i.test(process.env.PAUSE_WHEN_EMPTY || '');
-const YT_PROXY = process.env.YT_DLP_PROXY ?? 'http://127.0.0.1:8118';
 const ADMIN_IDS = new Set((process.env.ADMIN_ID || '').split(',').map(s => s.trim()).filter(Boolean));
 if (!TOKEN) { console.error('DISCORD_TOKEN required'); process.exit(1); }
 
@@ -186,19 +185,25 @@ async function buildChain(q, guildId, station) {
   const procs = [];
   let ff;
   if (station.type === 'youtube') {
-    let manifest;
+    // proxy is whatever actually resolved the manifest — WARP when the bridge is
+    // up, '' when it isn't. ffmpeg has to use that same value or the segments
+    // come back 403, so it is threaded through rather than recomputed.
+    let manifest, proxy;
     try {
-      manifest = await youtubeManifestUrl(station.url);
+      ({ manifest, proxy } = await youtubeManifestUrl(station.url));
     } catch (e) {
       const err = String(e.stderr || e.message || e);
       // A bot-check means the WARP exit IP is flagged; rotate so the retry that
-      // follows gets a fresh one.
-      if (YT_PROXY && isBotCheck(err)) { console.warn(`[${guildId}] yt-dlp bot-check — rotating WARP`); rotateWarp(); }
+      // follows gets a fresh one. Pointless when we resolved direct — there is
+      // no exit to rotate — so only rotate if the bridge was actually in play.
+      if (await ytProxy().catch(() => '') && isBotCheck(err)) {
+        console.warn(`[${guildId}] yt-dlp bot-check — rotating WARP`); rotateWarp();
+      }
       throw new Error(`yt-dlp resolve: ${err.trim().split('\n').pop().slice(0, 200)}`);
     }
     ff = spawn(FFMPEG, [
       '-loglevel', 'info',
-      ...(YT_PROXY ? ['-http_proxy', YT_PROXY] : []),
+      ...(proxy ? ['-http_proxy', proxy] : []),
       '-reconnect', '1', '-reconnect_streamed', '1',
       '-reconnect_on_network_error', '1', '-reconnect_on_http_error', '4xx,5xx',
       '-reconnect_delay_max', '5',
