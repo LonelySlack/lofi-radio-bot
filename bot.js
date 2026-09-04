@@ -100,7 +100,7 @@ function getQ(guildId) {
       procs: [], volume: 1, streaming: false, startedAt: 0, lastData: 0, fails: 0,
       nowPlaying: null, npMessage: null, npEditedAt: 0, npPending: null, restartTimer: null,
       recycleTimer: null, icyTimer: null, ffErr: '', notReadySince: 0, sweepNotReadySince: 0,
-      starting: false, stopped: false,
+      starting: false, stopped: false, uiGenre: null, uiPage: 0,
     });
   }
   return stations.get(guildId);
@@ -486,14 +486,12 @@ function uptime(ms) {
 const GENRE_SLOTS = 20;
 const GENRES = [...new Set(BUILTIN.map(s => s.genre))].slice(0, GENRE_SLOTS);
 
-// Tapping the genre you are already on advances within it; tapping a different
-// one starts at its first station. findIndex returning -1 for "not in this
-// genre" makes (-1 + 1) % n land on 0, which is exactly that rule.
-function nextInGenre(genre, currentId) {
-  const list = BUILTIN.filter(s => s.genre === genre);
-  if (!list.length) return null;
-  return list[(list.findIndex(s => s.id === currentId) + 1) % list.length];
-}
+// Picker geometry. Discord gives 5 rows of 5: the transport row takes one and
+// the nav row takes another, leaving 3 rows — 15 stations a page. The biggest
+// genre (malaysia, 30) therefore needs 2 pages, and nothing is ever more than
+// two taps away: genre, then station.
+const PAGE_SIZE = 15;
+const inGenre = (g) => BUILTIN.filter(s => s.genre === g);
 
 function npRows(q) {
   const b = (id, emoji, style = ButtonStyle.Secondary) => new ButtonBuilder().setCustomId(id).setEmoji(emoji).setStyle(style);
@@ -502,14 +500,37 @@ function npRows(q) {
       b('r_voldown', '🔉'), b('r_volup', '🔊'), b('r_random', '🔀'),
       b('r_refresh', '🔄'), b('r_stop', '⏹️', ButtonStyle.Danger)),
   ];
-  // A dropdown could only ever list 25 options, so 34 of the catalog — every
-  // Malaysian station among them — was unreachable from the panel. One button
-  // per genre plus in-genre cycling reaches all of them.
+
+  // Station view: the stations of one genre, paged. Cycling through a genre one
+  // tap at a time was fine for lofi's 4 but absurd for malaysia's 30 — HITZ was
+  // two taps in, WAI FM Bidayuh was thirty.
+  if (q.uiGenre) {
+    const list = inGenre(q.uiGenre);
+    const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+    const page = Math.min(Math.max(q.uiPage || 0, 0), pages - 1);
+    const slice = list.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+    for (let i = 0; i < slice.length; i += 5) {
+      rows.push(new ActionRowBuilder().addComponents(
+        slice.slice(i, i + 5).map(st => new ButtonBuilder()
+          .setCustomId(`r_s_${st.id}`)
+          .setLabel(st.name.slice(0, 80))
+          .setStyle(st.id === q.station?.id ? ButtonStyle.Success : ButtonStyle.Secondary))));
+    }
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('r_pg_prev').setEmoji('◀').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
+      new ButtonBuilder().setCustomId('r_pg_next').setEmoji('▶').setStyle(ButtonStyle.Secondary).setDisabled(page >= pages - 1),
+      new ButtonBuilder().setCustomId('r_back').setLabel(`${q.uiGenre} ${page + 1}/${pages}`).setEmoji('↩').setStyle(ButtonStyle.Primary)));
+    return rows;
+  }
+
+  // Genre view: one button per genre. A dropdown could only ever list 25
+  // options, so 34 of the catalog — every Malaysian station among them — was
+  // unreachable from the panel entirely.
   for (let i = 0; i < GENRES.length; i += 5) {
     rows.push(new ActionRowBuilder().addComponents(
       GENRES.slice(i, i + 5).map(g => new ButtonBuilder()
         .setCustomId(`r_g_${g}`)
-        .setLabel(g)
+        .setLabel(inGenre(g).length > 1 ? `${g} (${inGenre(g).length})` : g)
         .setStyle(g === q.station?.genre ? ButtonStyle.Primary : ButtonStyle.Secondary))));
   }
   return rows;
@@ -620,6 +641,18 @@ setInterval(async () => {
     await resumeGuild(guildId, q.channelId, q.station, q.volume).catch(() => {});
   }
 }, 5 * 60 * 1000);
+
+// Both panel paths that start audio end the same way: fall back to the saved
+// voice channel when the presser is not in one, close the picker, and play.
+async function playFromPanel(i, q, vc, station) {
+  const ch = vc || (q.channelId && await i.guild.channels.fetch(q.channelId).catch(() => null));
+  if (!ch) return i.followUp({ content: '❌ Join a voice channel first!', flags: MessageFlags.Ephemeral }).catch(() => {});
+  q.textChannel = i.channel; q.fails = 0;
+  q.uiGenre = null; q.uiPage = 0;
+  connect(i.guild, ch, q);
+  await startStream(i.guild.id, station);
+  return i.followUp({ content: `📻 Switched to **${station.name}**.`, flags: MessageFlags.Ephemeral }).catch(() => {});
+}
 
 async function resumeGuild(guildId, channelId, station, volume = 1, textChannelId = null) {
   const guild = await client.guilds.fetch(guildId).catch(() => null);
@@ -847,16 +880,32 @@ client.on('interactionCreate', async (i) => {
       if (i.customId === 'r_stop') { await i.deferUpdate(); cmdStop(i.guild); return i.followUp({ content: '⏹️ Off air.', flags: MessageFlags.Ephemeral }).catch(() => {}); }
       if (i.customId === 'r_refresh') { await i.deferUpdate(); return showNowPlaying(q); }
       if (i.customId === 'r_random') { await i.deferUpdate(); await cmdRandom(i.guild, vc, i.channel); return; }
+      // Genre tapped: open its station page. A genre holding exactly one station
+      // has nothing to choose between, so play it rather than showing a page of
+      // one button.
       if (i.customId.startsWith('r_g_')) {
         await i.deferUpdate();
-        const station = nextInGenre(i.customId.slice(4), q.station?.id);
-        if (!station) return i.followUp({ content: '❌ No stations in that genre.', flags: MessageFlags.Ephemeral }).catch(() => {});
-        const ch = vc || (q.channelId && await i.guild.channels.fetch(q.channelId).catch(() => null));
-        if (!ch) return i.followUp({ content: '❌ Join a voice channel first!', flags: MessageFlags.Ephemeral }).catch(() => {});
-        q.textChannel = i.channel; q.fails = 0;
-        connect(i.guild, ch, q);
-        await startStream(i.guild.id, station);
-        return i.followUp({ content: `📻 Switched to **${station.name}**.`, flags: MessageFlags.Ephemeral }).catch(() => {});
+        const genre = i.customId.slice(4);
+        const list = inGenre(genre);
+        if (!list.length) return i.followUp({ content: '❌ No stations in that genre.', flags: MessageFlags.Ephemeral }).catch(() => {});
+        if (list.length > 1) { q.uiGenre = genre; q.uiPage = 0; return showNowPlaying(q); }
+        return playFromPanel(i, q, vc, list[0]);
+      }
+      if (i.customId === 'r_pg_prev' || i.customId === 'r_pg_next') {
+        await i.deferUpdate();
+        q.uiPage = Math.max(0, (q.uiPage || 0) + (i.customId === 'r_pg_next' ? 1 : -1));
+        return showNowPlaying(q);
+      }
+      if (i.customId === 'r_back') {
+        await i.deferUpdate();
+        q.uiGenre = null; q.uiPage = 0;
+        return showNowPlaying(q);
+      }
+      if (i.customId.startsWith('r_s_')) {
+        await i.deferUpdate();
+        const station = await resolveStationId(i.customId.slice(4));
+        if (!station) return i.followUp({ content: '❌ That station no longer resolves.', flags: MessageFlags.Ephemeral }).catch(() => {});
+        return playFromPanel(i, q, vc, station);
       }
       if (i.customId === 'r_volup' || i.customId === 'r_voldown') {
         await i.deferUpdate();
