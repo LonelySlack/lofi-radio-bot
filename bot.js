@@ -479,16 +479,40 @@ function uptime(ms) {
   const s = Math.floor(ms / 1000), d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
 }
+// Genres in order of first appearance in the catalog, so the default vibe leads
+// and the buttons never reshuffle under someone between renders. Discord allows
+// 5 rows of 5 and the transport row takes one, leaving exactly 20 slots — which
+// is what the catalog currently uses. The cap keeps the panel valid if it grows.
+const GENRE_SLOTS = 20;
+const GENRES = [...new Set(BUILTIN.map(s => s.genre))].slice(0, GENRE_SLOTS);
+
+// Tapping the genre you are already on advances within it; tapping a different
+// one starts at its first station. findIndex returning -1 for "not in this
+// genre" makes (-1 + 1) % n land on 0, which is exactly that rule.
+function nextInGenre(genre, currentId) {
+  const list = BUILTIN.filter(s => s.genre === genre);
+  if (!list.length) return null;
+  return list[(list.findIndex(s => s.id === currentId) + 1) % list.length];
+}
+
 function npRows(q) {
   const b = (id, emoji, style = ButtonStyle.Secondary) => new ButtonBuilder().setCustomId(id).setEmoji(emoji).setStyle(style);
-  return [
+  const rows = [
     new ActionRowBuilder().addComponents(
       b('r_voldown', '🔉'), b('r_volup', '🔊'), b('r_random', '🔀'),
       b('r_refresh', '🔄'), b('r_stop', '⏹️', ButtonStyle.Danger)),
-    new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder().setCustomId('r_station').setPlaceholder('📻 Switch station…')
-        .addOptions(BUILTIN.slice(0, 25).map(s => ({ label: s.name.slice(0, 100), description: s.genre, value: s.id, default: q.station?.id === s.id })))),
   ];
+  // A dropdown could only ever list 25 options, so 34 of the catalog — every
+  // Malaysian station among them — was unreachable from the panel. One button
+  // per genre plus in-genre cycling reaches all of them.
+  for (let i = 0; i < GENRES.length; i += 5) {
+    rows.push(new ActionRowBuilder().addComponents(
+      GENRES.slice(i, i + 5).map(g => new ButtonBuilder()
+        .setCustomId(`r_g_${g}`)
+        .setLabel(g)
+        .setStyle(g === q.station?.genre ? ButtonStyle.Primary : ButtonStyle.Secondary))));
+  }
+  return rows;
 }
 async function showNowPlaying(q, { relocate = false } = {}) {
   if (!q.textChannel) return;
@@ -814,6 +838,17 @@ client.on('interactionCreate', async (i) => {
       if (i.customId === 'r_stop') { await i.deferUpdate(); cmdStop(i.guild); return i.followUp({ content: '⏹️ Off air.', flags: MessageFlags.Ephemeral }).catch(() => {}); }
       if (i.customId === 'r_refresh') { await i.deferUpdate(); return showNowPlaying(q); }
       if (i.customId === 'r_random') { await i.deferUpdate(); await cmdRandom(i.guild, vc, i.channel); return; }
+      if (i.customId.startsWith('r_g_')) {
+        await i.deferUpdate();
+        const station = nextInGenre(i.customId.slice(4), q.station?.id);
+        if (!station) return i.followUp({ content: '❌ No stations in that genre.', flags: MessageFlags.Ephemeral }).catch(() => {});
+        const ch = vc || (q.channelId && await i.guild.channels.fetch(q.channelId).catch(() => null));
+        if (!ch) return i.followUp({ content: '❌ Join a voice channel first!', flags: MessageFlags.Ephemeral }).catch(() => {});
+        q.textChannel = i.channel; q.fails = 0;
+        connect(i.guild, ch, q);
+        await startStream(i.guild.id, station);
+        return i.followUp({ content: `📻 Switched to **${station.name}**.`, flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
       if (i.customId === 'r_volup' || i.customId === 'r_voldown') {
         await i.deferUpdate();
         const delta = i.customId === 'r_volup' ? 10 : -10;
