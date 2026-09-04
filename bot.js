@@ -12,6 +12,19 @@ import { BUILTIN, findStation, stationFromUrl, searchStations, resolveStationId,
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
 
+/* ============================ logging ============================ */
+// Stamp every line with local time. Diagnosing a 24/7 bot means lining its log
+// up against Discord message times and station outages, and an untimed log makes
+// that pure guesswork. 'sv-SE' is the shortest route to a sortable local
+// YYYY-MM-DD HH:MM:SS with no locale surprises.
+{
+  const stamp = () => new Date().toLocaleString('sv-SE', { hour12: false });
+  for (const level of ['log', 'warn', 'error']) {
+    const orig = console[level].bind(console);
+    console[level] = (...args) => orig(stamp(), ...args);
+  }
+}
+
 const FFMPEG = process.env.FFMPEG_PATH || '/home/lonelyslack/bin/ffmpeg';
 const TOKEN = process.env.DISCORD_TOKEN;
 const PREFIX = process.env.PREFIX || 'lofi';
@@ -34,6 +47,23 @@ const FAILS_BEFORE_FALLBACK = 4;
 // forget the earlier failures (otherwise a bad night poisons the counter forever).
 const HEALTHY_AFTER_MS = 60000;
 const NP_EDIT_THROTTLE_MS = 5000;
+// How long the resume sweep tolerates a connection that is neither Ready nor
+// Destroyed before it tears it down. A wedged adapter looks "alive" forever, so
+// without this the sweep skips the exact case it exists to catch.
+const SWEEP_STUCK_MS = 90000;
+// Astro/iHeart endpoints answer with a 302 to an edge URL carrying a very short
+// lived token (…?rj-ttl=5&rj-tok=…). ffmpeg follows that correctly on a fresh
+// spawn, but its own -reconnect retries the *expired* token URL and gets
+// nowhere, so the stream simply ends. Re-spawning against the original URL
+// mints a fresh token, so for these a clean end is routine, not a fault.
+const TOKEN_REDIRECT_RE = /(^|\.)(revma\.com|streamtheworld\.com)$/i;
+// …but only once we've actually had audio for a while. A station that EOFs
+// immediately on every attempt is broken, not renewing, and must still fall back.
+const TOKEN_RENEW_GRACE_MS = 20000;
+function isTokenRedirect(station) {
+  if (!station?.url) return false;
+  try { return TOKEN_REDIRECT_RE.test(new URL(station.url).hostname); } catch { return false; }
+}
 
 /* ============================ persistence ============================ */
 // What each guild was listening to, so a restart (deploy, crash, nightly recycle)
@@ -70,7 +100,8 @@ function getQ(guildId) {
       station: null, player, connection: null, channelId: null, textChannel: null,
       procs: [], volume: 1, streaming: false, startedAt: 0, lastData: 0, fails: 0,
       nowPlaying: null, npMessage: null, npEditedAt: 0, npPending: null, restartTimer: null,
-      recycleTimer: null, icyTimer: null, ffErr: '', notReadySince: 0, starting: false, stopped: false,
+      recycleTimer: null, icyTimer: null, ffErr: '', notReadySince: 0, sweepNotReadySince: 0,
+      starting: false, stopped: false,
     });
   }
   return stations.get(guildId);
@@ -175,13 +206,21 @@ async function buildChain(q, guildId, station) {
       '-i', manifest, ...ffTail(q),
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
   } else {
-    ff = spawn(FFMPEG, [
-      '-loglevel', 'info',
-      // ffmpeg's own recovery for the ordinary case (a blip, a 5xx, a CDN hiccup).
-      // The watchdog above is the backstop for when even this gives up.
+    // ffmpeg's own recovery for the ordinary case (a blip, a 5xx, a CDN hiccup).
+    // The watchdog above is the backstop for when even this gives up.
+    //
+    // Token-redirect stations are the exception: ffmpeg would retry the expired
+    // edge URL and burn -reconnect_delay_max seconds getting nowhere, delaying
+    // the honest failure. Let it exit promptly instead — onStreamDown re-spawns
+    // against the original URL, which is the only thing that actually recovers.
+    const reconnect = isTokenRedirect(station) ? [] : [
       '-reconnect', '1', '-reconnect_streamed', '1',
       '-reconnect_on_network_error', '1', '-reconnect_on_http_error', '4xx,5xx',
       '-reconnect_delay_max', '10',
+    ];
+    ff = spawn(FFMPEG, [
+      '-loglevel', 'info',
+      ...reconnect,
       '-rw_timeout', '20000000',           // 20s in microseconds — don't hang on a dead socket
       '-i', station.url, ...ffTail(q),
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -218,8 +257,18 @@ async function startStream(guildId, station) {
     console.log(`[${guildId}] 📻 ${station.name} (${station.type})`);
     // Wait for the voice handshake — NoSubscriberBehavior.Play throws audio away
     // while the connection isn't Ready, so starting early burns the first seconds.
-    await awaitVoiceReady(q, guildId);
+    const ready = await awaitVoiceReady(q, guildId);
     if (q.stopped) return;
+    if (!ready) {
+      // Playing into a connection that never reached Ready is worse than not
+      // playing at all: bytes flow, q.lastData keeps ticking, the stall watchdog
+      // stays green — and the channel is silent while every health signal reads
+      // OK. That is exactly how a wedged adapter went unnoticed for 13 hours.
+      // Refuse to start, and let the retry ladder keep working on voice instead.
+      q.starting = false;
+      onStreamDown(guildId, 'voice never reached Ready', false, true);
+      return;
+    }
     let resource;
     try {
       resource = await buildChain(q, guildId, station);
@@ -271,27 +320,54 @@ function stopStream(guildId, { keepConnection = true } = {}) {
 
 // Single funnel for every way a stream can die. Backs off, and after enough
 // consecutive failures switches to the fallback station rather than going quiet.
-function onStreamDown(guildId, reason, immediate = false) {
+function onStreamDown(guildId, reason, immediate = false, voiceFault = false) {
   const q = stations.get(guildId);
   if (!q || q.stopped || q.starting || !q.station) return;
   if (q.restartTimer) return;                 // a rebuild is already queued
   q.streaming = false;
   killChain(q);
 
-  if (Date.now() - q.startedAt > HEALTHY_AFTER_MS) q.fails = 0;   // it ran fine for a while; this is fresh trouble
-  q.fails++;
-  const delay = immediate ? 500 : Math.min(30000, 1000 * 2 ** Math.min(q.fails, 5));
-  console.error(`[${guildId}] ✖ stream down (${reason}) — retry #${q.fails} in ${Math.round(delay / 1000)}s`);
+  // An edge token expiring on a station that had been playing happily is routine
+  // housekeeping, not a failure — re-spawning against the original URL mints a
+  // new one. Charging it a strike would march every Astro station to the
+  // fallback within a few minutes, which is precisely what used to happen.
+  const tokenRenewal = !voiceFault
+    && Date.now() - q.startedAt > TOKEN_RENEW_GRACE_MS
+    && isTokenRedirect(q.station)
+    && /player idle|ffmpeg exit/.test(reason);
+
+  if (tokenRenewal) {
+    console.log(`[${guildId}] ↻ ${q.station.name} edge token expired — re-resolving`);
+  } else {
+    // A stream that ran clean for a while and only then broke is fresh trouble,
+    // so old failures shouldn't count against it. Voice faults are exempt: a
+    // wedged connection cycles roughly every 90s, so the amnesty would fire on
+    // every single pass and q.fails could never climb — no backoff, no ceiling.
+    if (!voiceFault && Date.now() - q.startedAt > HEALTHY_AFTER_MS) q.fails = 0;
+    q.fails++;
+  }
+  const delay = (immediate || tokenRenewal) ? 500 : Math.min(30000, 1000 * 2 ** Math.min(q.fails, 5));
+  if (!tokenRenewal) console.error(`[${guildId}] ✖ stream down (${reason}) — retry #${q.fails} in ${Math.round(delay / 1000)}s`);
 
   q.restartTimer = setTimeout(async () => {
     q.restartTimer = null;
     let next = q.station;
     if (q.fails >= FAILS_BEFORE_FALLBACK) {
-      const fb = await resolveStationId(FALLBACK_STATION).catch(() => null);
-      if (fb && fb.url !== q.station.url) {
-        console.warn(`[${guildId}] ⤵ falling back to ${fb.name} after ${q.fails} failures`);
-        q.textChannel?.send(`⚠️ **${q.station.name}** keeps dropping — switching to **${fb.name}** so the channel stays live.`).catch(() => {});
-        next = fb; q.fails = 0;
+      if (voiceFault) {
+        // The station is fine — the socket isn't. Swapping stations would just
+        // play something else into the same dead connection, so rebuild voice
+        // instead. startStream's awaitVoiceReady does this too; this is the
+        // slower ladder catching the case where that keeps losing.
+        console.warn(`[${guildId}] ⤵ ${q.fails} voice failures — rebuilding the voice connection`);
+        q.fails = 0;
+        await rebuildVoice(q, guildId).catch(() => false);
+      } else {
+        const fb = await resolveStationId(FALLBACK_STATION).catch(() => null);
+        if (fb && fb.url !== q.station.url) {
+          console.warn(`[${guildId}] ⤵ falling back to ${fb.name} after ${q.fails} failures`);
+          q.textChannel?.send(`⚠️ **${q.station.name}** keeps dropping — switching to **${fb.name}** so the channel stays live.`).catch(() => {});
+          next = fb; q.fails = 0;
+        }
       }
     }
     startStream(guildId, next).catch(e => console.error(`[${guildId}] restart failed: ${e.message}`));
@@ -312,10 +388,36 @@ setInterval(() => {
     const st = q.connection?.state?.status;
     if (st !== VoiceConnectionStatus.Ready) {
       q.notReadySince ||= Date.now();
-      if (Date.now() - q.notReadySince > 60000) { q.notReadySince = 0; onStreamDown(guildId, `voice not Ready for 60s (${st})`); }
+      if (Date.now() - q.notReadySince > 60000) { q.notReadySince = 0; onStreamDown(guildId, `voice not Ready for 60s (${st})`, false, true); }
     } else q.notReadySince = 0;
   }
 }, WATCHDOG_MS);
+
+/* ============================ health heartbeat ============================ */
+// An external check can only see "is the process alive", and that stayed green
+// through a 13-hour silent outage. Publish the things that actually decide
+// whether anyone can hear us — voice status and time since the last audio byte —
+// so bot-health-check.sh can assert on them instead of on liveness.
+const HEALTH_FILE = join(__dirname, 'health.json');
+function writeHealth() {
+  const guilds = [...stations]
+    .filter(([, q]) => !q.stopped && q.station)
+    .map(([gid, q]) => ({
+      guildId: gid,
+      station: q.station?.name ?? null,
+      voice: q.connection?.state?.status ?? 'none',
+      streaming: !!q.streaming,
+      silentMs: q.lastData ? Date.now() - q.lastData : null,
+      fails: q.fails,
+    }));
+  // No guild on air is a legitimate idle state, not a fault.
+  const ok = guilds.every(g => g.voice === VoiceConnectionStatus.Ready && g.streaming && g.silentMs !== null && g.silentMs < STALL_MS);
+  try {
+    writeFileSync(HEALTH_FILE + '.tmp', JSON.stringify({ ts: Date.now(), pid: process.pid, ok, guilds }, null, 2));
+    renameSync(HEALTH_FILE + '.tmp', HEALTH_FILE);
+  } catch (e) { /* a health file we can't write must never take the bot down */ }
+}
+setInterval(writeHealth, 15000);
 
 /* ============================ now playing ============================ */
 function setNowPlaying(guildId, title) {
@@ -393,11 +495,45 @@ async function awaitVoiceReady(q, guildId, ms = 15000) {
   const c = q.connection;
   if (!c || c.state.status === VoiceConnectionStatus.Ready) return !!c;
   try { await entersState(c, VoiceConnectionStatus.Ready, ms); return true; } catch {}
-  if (c.state.status === VoiceConnectionStatus.Destroyed) return false;
+  if (c.state.status === VoiceConnectionStatus.Destroyed) return rebuildVoice(q, guildId, ms);
   console.error(`[${guildId}] ⚠ voice stuck (${c.state.status}) — forcing rejoin`);
   try { c.rejoin(); } catch {}
-  try { await entersState(c, VoiceConnectionStatus.Ready, ms); return true; }
+  try { await entersState(c, VoiceConnectionStatus.Ready, ms); return true; } catch {}
+  // rejoin() re-sends op 4 over the *same* connection and adapter. When the
+  // adapter itself is dead — the usual cause is a gateway shard resume leaving
+  // it bound to a socket that no longer exists — no number of rejoins will ever
+  // reach Ready. Only a brand-new connection object recovers from that, so stop
+  // asking politely and rebuild.
+  console.error(`[${guildId}] ⚠ rejoin didn't take — rebuilding the voice connection`);
+  return rebuildVoice(q, guildId, ms);
+}
+// Destroy whatever we have and join again from scratch, so the new connection
+// gets a fresh adapter bound to the live shard.
+async function rebuildVoice(q, guildId, ms = 15000) {
+  const channelId = q.channelId;
+  if (!channelId) return false;
+  const guild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId).catch(() => null);
+  const ch = guild ? await guild.channels.fetch(channelId).catch(() => null) : null;
+  if (!ch || !ch.isVoiceBased()) { console.error(`[${guildId}] ❌ voice channel ${channelId} is gone — cannot rebuild`); return false; }
+  try { q.connection?.destroy(); } catch {}
+  // connect() short-circuits when it thinks the existing connection is usable;
+  // clearing both fields is what makes it actually build a new one.
+  q.connection = null;
+  q.channelId = null;
+  try { connect(guild, ch, q); }
+  catch (e) {
+    // Leaving channelId null would strand the guild for good: the resume sweep
+    // skips any guild without one, so nothing would ever retry, and the next
+    // saveState would persist the hole across restarts too. Put it back and let
+    // the retry ladder keep working.
+    q.channelId = channelId;
+    console.error(`[${guildId}] ❌ voice rebuild failed: ${e.message}`);
+    return false;
+  }
+  try { await entersState(q.connection, VoiceConnectionStatus.Ready, ms); }
   catch { console.error(`[${guildId}] ❌ voice never reached Ready — audio will be silent`); return false; }
+  console.log(`[${guildId}] ✅ voice connection rebuilt`);
+  return true;
 }
 function connect(guild, voiceChannel, q) {
   if (q.connection && q.channelId === voiceChannel.id && q.connection.state.status !== VoiceConnectionStatus.Destroyed) return;
@@ -430,8 +566,19 @@ function connect(guild, voiceChannel, q) {
 setInterval(async () => {
   for (const [guildId, q] of stations) {
     if (q.stopped || !q.station || !q.channelId) continue;
-    const alive = q.connection && q.connection.state.status !== VoiceConnectionStatus.Destroyed;
-    if (alive) continue;
+    const st = q.connection?.state?.status;
+    if (st === VoiceConnectionStatus.Ready) { q.sweepNotReadySince = 0; continue; }
+    if (q.connection && st !== VoiceConnectionStatus.Destroyed) {
+      // Neither Ready nor Destroyed: a wedged adapter. The old test called this
+      // "alive" and skipped it, which is how a `signalling` zombie survived for
+      // 13 hours untouched. Give it SWEEP_STUCK_MS to sort itself out, then tear
+      // it down so the reconnect below has something to replace.
+      q.sweepNotReadySince ||= Date.now();
+      if (Date.now() - q.sweepNotReadySince < SWEEP_STUCK_MS) continue;
+      console.warn(`[${guildId}] resume sweep — voice stuck in ${st}, tearing it down`);
+      try { q.connection.destroy(); } catch {}
+    }
+    q.sweepNotReadySince = 0;
     console.warn(`[${guildId}] resume sweep — reconnecting`);
     await resumeGuild(guildId, q.channelId, q.station, q.volume).catch(() => {});
   }
