@@ -79,7 +79,7 @@ function saveState() {
   saveTimer = setTimeout(() => {
     const out = {};
     for (const [gid, q] of stations) {
-      if (q.channelId && q.station) out[gid] = { channelId: q.channelId, stationId: q.station.id === 'custom' ? q.station.url : q.station.id, volume: q.volume };
+      if (q.channelId && q.station) out[gid] = { channelId: q.channelId, textChannelId: q.textChannel?.id ?? null, stationId: q.station.id === 'custom' ? q.station.url : q.station.id, volume: q.volume };
     }
     try { writeFileSync(STATE_FILE + '.tmp', JSON.stringify(out, null, 2)); renameSync(STATE_FILE + '.tmp', STATE_FILE); }
     catch (e) { console.error(`[state] save failed: ${e.message}`); }
@@ -621,13 +621,22 @@ setInterval(async () => {
   }
 }, 5 * 60 * 1000);
 
-async function resumeGuild(guildId, channelId, station, volume = 1) {
+async function resumeGuild(guildId, channelId, station, volume = 1, textChannelId = null) {
   const guild = await client.guilds.fetch(guildId).catch(() => null);
   if (!guild) return;
   const ch = await guild.channels.fetch(channelId).catch(() => null);
   if (!ch || !ch.isVoiceBased()) { console.warn(`[${guildId}] saved channel ${channelId} is gone`); return; }
   const q = getQ(guildId);
   q.volume = volume;
+  // Without this the panel silently never comes back after a restart:
+  // showNowPlaying returns at its first line when textChannel is unset, so the
+  // bot resumed playing but posted nothing, and any UI change looked like it
+  // had not deployed. Keep whatever a live command already set.
+  if (!q.textChannel && textChannelId) {
+    const tc = await guild.channels.fetch(textChannelId).catch(() => null);
+    if (tc?.isTextBased()) q.textChannel = tc;
+    else console.warn(`[${guildId}] saved text channel ${textChannelId} is gone — panel will wait for \`${PREFIX} np\``);
+  }
   connect(guild, ch, q);
   await startStream(guildId, station);
 }
@@ -758,7 +767,7 @@ onReady(async () => {
     try {
       const station = await resolveStationId(s.stationId);
       if (!station) { console.warn(`[${guildId}] saved station ${s.stationId} no longer resolves`); continue; }
-      await resumeGuild(guildId, s.channelId, station, s.volume ?? 1);
+      await resumeGuild(guildId, s.channelId, station, s.volume ?? 1, s.textChannelId);
     } catch (e) { console.error(`[${guildId}] resume failed: ${e.message}`); }
   }
 });
