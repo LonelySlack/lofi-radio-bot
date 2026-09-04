@@ -490,7 +490,7 @@ const GENRES = [...new Set(BUILTIN.map(s => s.genre))].slice(0, GENRE_SLOTS);
 // the nav row takes another, leaving 3 rows — 15 stations a page. The biggest
 // genre (malaysia, 30) therefore needs 2 pages, and nothing is ever more than
 // two taps away: genre, then station.
-const PAGE_SIZE = 15;
+const PAGE_SIZE = 25;
 const inGenre = (g) => BUILTIN.filter(s => s.genre === g);
 
 function npRows(q) {
@@ -509,17 +509,23 @@ function npRows(q) {
     const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
     const page = Math.min(Math.max(q.uiPage || 0, 0), pages - 1);
     const slice = list.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-    for (let i = 0; i < slice.length; i += 5) {
-      rows.push(new ActionRowBuilder().addComponents(
-        slice.slice(i, i + 5).map(st => new ButtonBuilder()
-          .setCustomId(`r_s_${st.id}`)
-          .setLabel(st.name.slice(0, 80))
-          .setStyle(st.id === q.station?.id ? ButtonStyle.Success : ButtonStyle.Secondary))));
-    }
+    // A select menu holds 25 options and malaysia has 30, so the page buttons
+    // below stay for the genres that overflow; they are hidden for the ones
+    // that fit, which is every genre but that one.
     rows.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder().setCustomId('r_station')
+        .setPlaceholder(`📻 ${q.uiGenre} — pick a station…`)
+        .addOptions(slice.map(st => ({
+          label: st.name.slice(0, 100),
+          description: `${st.genre}${st.country ? ' · ' + st.country : ''}`.slice(0, 100),
+          value: st.id,
+          default: st.id === q.station?.id,
+        })))));
+    const nav = [new ButtonBuilder().setCustomId('r_back').setLabel('Genres').setEmoji('↩').setStyle(ButtonStyle.Primary)];
+    if (pages > 1) nav.unshift(
       new ButtonBuilder().setCustomId('r_pg_prev').setEmoji('◀').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
-      new ButtonBuilder().setCustomId('r_pg_next').setEmoji('▶').setStyle(ButtonStyle.Secondary).setDisabled(page >= pages - 1),
-      new ButtonBuilder().setCustomId('r_back').setLabel(`${q.uiGenre} ${page + 1}/${pages}`).setEmoji('↩').setStyle(ButtonStyle.Primary)));
+      new ButtonBuilder().setCustomId('r_pg_next').setLabel(`${page + 1}/${pages}`).setEmoji('▶').setStyle(ButtonStyle.Secondary).setDisabled(page >= pages - 1));
+    rows.push(new ActionRowBuilder().addComponents(nav));
     return rows;
   }
 
@@ -530,7 +536,7 @@ function npRows(q) {
     rows.push(new ActionRowBuilder().addComponents(
       GENRES.slice(i, i + 5).map(g => new ButtonBuilder()
         .setCustomId(`r_g_${g}`)
-        .setLabel(inGenre(g).length > 1 ? `${g} (${inGenre(g).length})` : g)
+        .setLabel(g)
         .setStyle(g === q.station?.genre ? ButtonStyle.Primary : ButtonStyle.Secondary))));
   }
   return rows;
@@ -870,6 +876,7 @@ client.on('interactionCreate', async (i) => {
       const station = await resolveStationId(i.values[0]);
       if (!station) return i.followUp({ content: '❌ That station no longer resolves.', flags: MessageFlags.Ephemeral }).catch(() => {});
       q.textChannel = i.channel; q.fails = 0;
+      q.uiGenre = null; q.uiPage = 0;      // back to the genre view once a pick lands
       connect(i.guild, vc, q);
       await startStream(i.guild.id, station);
       return i.followUp({ content: `📻 Switched to **${station.name}**.`, flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -900,12 +907,6 @@ client.on('interactionCreate', async (i) => {
         await i.deferUpdate();
         q.uiGenre = null; q.uiPage = 0;
         return showNowPlaying(q);
-      }
-      if (i.customId.startsWith('r_s_')) {
-        await i.deferUpdate();
-        const station = await resolveStationId(i.customId.slice(4));
-        if (!station) return i.followUp({ content: '❌ That station no longer resolves.', flags: MessageFlags.Ephemeral }).catch(() => {});
-        return playFromPanel(i, q, vc, station);
       }
       if (i.customId === 'r_volup' || i.customId === 'r_voldown') {
         await i.deferUpdate();
