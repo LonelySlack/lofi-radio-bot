@@ -134,6 +134,7 @@ export const BUILTIN = [
   { id: 'bfm',         name: 'BFM 89.9',          type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/s91qy9p0zs3vv' },
   { id: '988',         name: '988 FM',            type: 'icecast', genre: 'malaysia', url: 'https://28103.live.streamtheworld.com/988_FMAAC.aac' },
   { id: 'fly',         name: 'Fly FM',            type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/q17aka9mtd3vv' },
+  { id: 'hot',         name: 'Hot FM',            type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/drakdf8mtd3vv' },
   { id: 'eight',       name: 'Eight FM',          type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/qp0xrd9mtd3vv' },
   { id: 'cats',        name: 'Cats FM',           type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/51qe53rv0y3vv' },
   { id: 'cityplus',    name: 'CITYPlus FM',       type: 'icecast', genre: 'malaysia', url: 'https://stream.rcs.revma.com/9ykdmcawe1bwv' },
