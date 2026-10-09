@@ -110,11 +110,15 @@ export const BUILTIN = [
   // resolving until the next one starts - the fallback covers that.
   { id: 'sleep',          name: 'Deep Sleep Music',     type: 'youtube', genre: 'sleep',     url: 'https://www.youtube.com/@YellowBrickCinema/live' },
   { id: 'whitenoise',     name: 'Relaxing White Noise', type: 'youtube', genre: 'sleep',     url: 'https://www.youtube.com/@RelaxingWhiteNoise/live' },
-  { id: 'rain',           name: 'Rain Sounds',          type: 'youtube', genre: 'nature',    url: 'https://www.youtube.com/@TheRelaxedGuy/live' },
+  { id: 'rain',           name: 'Rain Sounds',          type: 'youtube', genre: 'sleep',     url: 'https://www.youtube.com/@TheRelaxedGuy/live' },
   { id: 'piano',          name: 'Beautiful Piano',      type: 'youtube', genre: 'piano',     url: 'https://www.youtube.com/@SoothingRelaxation/live' },
   { id: 'cafejazz',       name: 'Cafe Music BGM',       type: 'youtube', genre: 'jazz',      url: 'https://www.youtube.com/@CafeMusicBGMchannel/live' },
   { id: 'calmed',         name: 'Calmed By Nature',     type: 'youtube', genre: 'jazz',      url: 'https://www.youtube.com/@CalmedByNature/live' },
   { id: 'focus',          name: 'Focus & Study',        type: 'youtube', genre: 'focus',     url: 'https://www.youtube.com/@GreenredProductions/live' },
+  // ---- Quran (24/7 recitations) ------------------------------------------
+  { id: 'quran-mishary',  name: 'Mishary Alafasy',      type: 'icecast', genre: 'quran',     url: 'https://qurango.net/radio/mishary_alafasi' },
+  { id: 'quran-sakeenah', name: 'Calm Recitations',     type: 'icecast', genre: 'quran',     url: 'https://qurango.net/radio/sakeenah' },
+  { id: 'quran-cairo',    name: 'Quran Radio Cairo',    type: 'icecast', genre: 'quran',     url: 'https://stream.radiojar.com/8s5u5tpdtwzuv' },
   // ---- Malaysia ----------------------------------------------------------
   // Astro Radio and RTM both publish open stream endpoints. The Astro ones are
   // given as the stable stream.rcs.revma.com/<id> form rather than the
