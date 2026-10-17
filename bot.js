@@ -961,4 +961,11 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
 process.on('unhandledRejection', (e) => console.error(`[unhandled] ${e?.message || e}`));
 process.on('uncaughtException', (e) => console.error(`[uncaught] ${e?.stack || e}`));
 
-client.login(TOKEN);
+// ...but a failed login is not stray: the catch-all above would swallow it and
+// leave the process up with no Discord connection, as happened after the
+// 2026-10-17 reboot when the network wasn't ready yet. Exit so systemd's
+// Restart=always tries again in 10s.
+client.login(TOKEN).catch((e) => {
+  console.error(`login failed: ${e?.message || e}`);
+  process.exit(1);
+});
